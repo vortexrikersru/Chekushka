@@ -1,4 +1,4 @@
-<img width="1154" height="931" alt="image" src="https://github.com/user-attachments/assets/049dd760-362c-4cac-bc53-a0951722ffab" />
+<img width="1248" height="1011" alt="image" src="https://github.com/user-attachments/assets/d097c9fb-ffcb-464e-aab9-19ca768f7265" />
 
 
 # Chekushka — Modern Active Directory User Inspector
