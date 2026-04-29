@@ -1,16 +1,26 @@
-Add-Type -AssemblyName PresentationCore,PresentationFramework,WindowsBase
+﻿<#
+.SYNOPSIS
+    User account management tool that always queries the PDC Emulator for lockout status,
+    and unlocks accounts on both the PDC Emulator and the nearest domain controller.
+.DESCRIPTION
+    Searches for AD users by login or surname, displays account status (locked, disabled,
+    password expiry), and allows unlocking on both the PDC Emulator and the nearest DC.
+.NOTES
+    Requires ActiveDirectory module and appropriate permissions.
+#>
+
+Add-Type -AssemblyName PresentationCore, PresentationFramework, WindowsBase
 
 # ============================
-# Modern Clean UI (Style A)
+# XAML UI Definition
 # ============================
 $xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Chekushka" Height="520" Width="640"
+        Title="Chekushka - Health Bar" Height="520" Width="640"
         WindowStartupLocation="CenterScreen"
         Background="#F4F4F4"
         FontFamily="Segoe UI" FontSize="14">
-
     <Grid Margin="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -19,17 +29,15 @@ $xaml = @"
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- SEARCH BOX -->
+        <!-- Search Box -->
         <Border Grid.Row="0" Background="White" Padding="12" CornerRadius="6" Margin="0,0,0,12">
             <StackPanel>
-                <TextBlock Text="Search user" FontWeight="Bold" Margin="0,0,0,8"/>
-
+                <TextBlock Text="Search user (PDC Emulator)" FontWeight="Bold" Margin="0,0,0,8"/>
                 <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                     <TextBlock Text="Search by:" VerticalAlignment="Center" Margin="0,0,10,0"/>
                     <RadioButton x:Name="rbLogin" Content="Login" IsChecked="True" Margin="0,0,10,0"/>
                     <RadioButton x:Name="rbSurname" Content="Surname"/>
                 </StackPanel>
-
                 <StackPanel Orientation="Horizontal">
                     <TextBox x:Name="tbSearch" Width="300" Height="28" Margin="0,0,10,0"/>
                     <Button x:Name="btnSearch" Content="Search" Width="100" Height="28"
@@ -39,17 +47,15 @@ $xaml = @"
             </StackPanel>
         </Border>
 
-        <!-- RESULT BOX -->
+        <!-- Result Box -->
         <Border Grid.Row="1" Background="White" Padding="12" CornerRadius="6" Margin="0,0,0,12">
             <StackPanel>
                 <TextBlock Text="User information" FontWeight="Bold" Margin="0,0,0,8"/>
-
                 <Grid Margin="0,4">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="200"/>
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
@@ -89,7 +95,7 @@ $xaml = @"
             </StackPanel>
         </Border>
 
-        <!-- STATUS BAR -->
+        <!-- Status Bar -->
         <Border Grid.Row="3" Background="#EDEDED" Padding="8" CornerRadius="4">
             <TextBlock x:Name="txtStatus" Foreground="Black"/>
         </Border>
@@ -97,245 +103,364 @@ $xaml = @"
 </Window>
 "@
 
-# Load XAML
-$reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
-$window = [Windows.Markup.XamlReader]::Load($reader)
-
-# Controls
-$rbLogin     = $window.FindName("rbLogin")
-$rbSurname   = $window.FindName("rbSurname")
-$tbSearch    = $window.FindName("tbSearch")
-$btnSearch   = $window.FindName("btnSearch")
-$btnUnlock   = $window.FindName("btnUnlock")
-
-$txtUser      = $window.FindName("txtUser")
-$txtDisabled  = $window.FindName("txtDisabled")
-$txtLocked    = $window.FindName("txtLocked")
-$txtPwdExpired= $window.FindName("txtPwdExpired")
-$txtAccExpired= $window.FindName("txtAccExpired")
-$txtMustChange= $window.FindName("txtMustChange")
-$txtPwdExpires= $window.FindName("txtPwdExpires")
-$txtStatus    = $window.FindName("txtStatus")
-
-# Current user for unlock
-$script:CurrentSam = $null
-
 # ============================
 # Helper Functions
 # ============================
 
-function Set-Status {
-    param([string]$Message, [bool]$IsError = $false)
-
-    $txtStatus.Text = $Message
-    $txtStatus.Foreground = if ($IsError) { "DarkRed" } else { "DarkGreen" }
+function Set-StatusMessage {
+    param(
+        [string]$Message,
+        [bool]$IsError = $false
+    )
+    $script:txtStatus.Text = $Message
+    $script:txtStatus.Foreground = if ($IsError) { 'DarkRed' } else { 'DarkGreen' }
 }
 
-function Clear-Result {
-    foreach ($tb in @(
-        $txtUser,$txtDisabled,$txtLocked,$txtPwdExpired,
-        $txtAccExpired,$txtMustChange,$txtPwdExpires
-    )) { $tb.Text = "" }
+function Clear-ResultFields {
+    $fields = @($txtUser, $txtDisabled, $txtLocked, $txtPwdExpired,
+                $txtAccExpired, $txtMustChange, $txtPwdExpires)
+    foreach ($field in $fields) { $field.Text = '' }
 
-    foreach ($c in @(
-        $txtDisabled,$txtLocked,$txtPwdExpired,
-        $txtAccExpired,$txtMustChange,$txtPwdExpires
-    )) {
-        $c.Foreground = "Black"
-        $c.FontWeight = "Normal"
+    $highlightControls = @($txtDisabled, $txtLocked, $txtPwdExpired,
+                           $txtAccExpired, $txtMustChange, $txtPwdExpires)
+    foreach ($ctrl in $highlightControls) {
+        $ctrl.Foreground = 'Black'
+        $ctrl.FontWeight = 'Normal'
     }
 
-    $btnUnlock.Visibility = "Collapsed"
+    $script:btnUnlock.Visibility = 'Collapsed'
     $script:CurrentSam = $null
-    Set-Status ""
+    Set-StatusMessage ''
 }
 
-function Mark-RedBold {
-    param($control)
-    $control.Foreground = "Red"
-    $control.FontWeight = "Bold"
+function Set-RedBold {
+    param($Control)
+    $Control.Foreground = 'Red'
+    $Control.FontWeight = 'Bold'
 }
 
-function Format-Date {
-    param([datetime]$dt)
-    $dt.ToString("dd/MM/yyyy")
+function Format-DateShort {
+    param([datetime]$Date)
+    $Date.ToString('dd/MM/yyyy')
 }
 
-# Cache default domain policy
-try {
-    Import-Module ActiveDirectory -ErrorAction Stop
-    $Global:MaxPasswordAgeDays = [int](Get-ADDefaultDomainPasswordPolicy).MaxPasswordAge.TotalDays
-} catch {
-    $Global:MaxPasswordAgeDays = 120
+# ============================
+# Core Business Logic
+# ============================
+
+function Get-PDCEmulator {
+    try {
+        $domain = Get-ADDomain -ErrorAction Stop
+        return $domain.PDCEmulator
+    }
+    catch {
+        throw "Unable to determine PDC Emulator: $($_.Exception.Message)"
+    }
+}
+
+# === CHANGED: New function to get a nearest DC (different from PDC) ===
+function Get-NearestDC {
+    try {
+        # Get current AD site
+        $currentSite = (Get-ADDomainController -Discover -ErrorAction Stop).Site
+        if (-not $currentSite) {
+            throw "Could not determine current AD site."
+        }
+
+        # Find all DCs in the same site, exclude PDC, pick the first one
+        $otherDCs = Get-ADDomainController -Filter "Site -eq '$currentSite' -and IsReadOnly -eq `$false" -ErrorAction Stop |
+                    Where-Object { $_.HostName -ne $script:PDCServer }
+
+        if (-not $otherDCs) {
+            # Fallback: just pick any writable DC other than PDC
+            $otherDCs = Get-ADDomainController -Filter "IsReadOnly -eq `$false" -ErrorAction Stop |
+                        Where-Object { $_.HostName -ne $script:PDCServer }
+        }
+
+        if ($otherDCs) {
+            $nearestDC = $otherDCs[0].HostName
+            Write-Verbose "Nearest DC (non-PDC): $nearestDC"
+            return $nearestDC
+        }
+        else {
+            Write-Warning "No other writable DC found besides PDC."
+            return $null
+        }
+    }
+    catch {
+        Write-Warning "Failed to find nearest DC: $($_.Exception.Message)"
+        return $null
+    }
+}
+
+function Get-DefaultPasswordAge {
+    param([string]$PDCServer)
+    try {
+        $policy = Get-ADDefaultDomainPasswordPolicy -Server $PDCServer -ErrorAction Stop
+        return [int]$policy.MaxPasswordAge.TotalDays
+    }
+    catch {
+        Write-Warning "Could not retrieve password policy from PDC. Using fallback 120 days."
+        return 120
+    }
 }
 
 function Get-PasswordExpiryInfo {
-    param($User)
-
+    param(
+        [Microsoft.ActiveDirectory.Management.ADUser]$User,
+        [string]$PDCServer,
+        [int]$DefaultMaxAge
+    )
     try {
-        $fgpp = Get-ADUserResultantPasswordPolicy -Identity $User.SamAccountName -ErrorAction Stop
-        $maxAgeDays = [int]$fgpp.MaxPasswordAge.TotalDays
-    } catch {
-        $maxAgeDays = $Global:MaxPasswordAgeDays
+        $fgpp = Get-ADUserResultantPasswordPolicy -Identity $User.SamAccountName -Server $PDCServer -ErrorAction Stop
+        $maxAge = [int]$fgpp.MaxPasswordAge.TotalDays
+    }
+    catch {
+        $maxAge = $DefaultMaxAge
     }
 
     if ($User.PasswordNeverExpires) {
-        return @{ Expired = $false; ExpiryText = "Password never expires" }
+        return @{ Expired = $false; ExpiryText = 'Password never expires' }
     }
-
     if ($User.pwdLastSet -eq 0) {
-        return @{ Expired = $false; ExpiryText = "Must change at next logon" }
+        return @{ Expired = $false; ExpiryText = 'Must change at next logon' }
     }
-
     if (-not $User.PasswordLastSet) {
-        return @{ Expired = $false; ExpiryText = "PasswordLastSet unknown" }
+        return @{ Expired = $false; ExpiryText = 'PasswordLastSet unknown' }
     }
 
-    $expiry = $User.PasswordLastSet.AddDays($maxAgeDays)
+    $expiry = $User.PasswordLastSet.AddDays($maxAge)
     $expired = $expiry -lt (Get-Date)
 
     return @{
-        Expired = $expired
+        Expired    = $expired
         ExpiryText = if ($expired) {
-            "Expired on $(Format-Date $expiry)"
+            "Expired on $(Format-DateShort $expiry)"
         } else {
-            "Will expire on $(Format-Date $expiry)"
+            "Will expire on $(Format-DateShort $expiry)"
         }
     }
 }
 
-# ============================
-# Main Search Logic
-# ============================
-
-function Run-Search {
-
-    Clear-Result
-    $searchValue = $tbSearch.Text.Trim()
-
-    if (-not $searchValue) {
-        Set-Status "Please enter a search value." $true
-        return
-    }
-
-    $props = @(
-        "Enabled","LockedOut","AccountExpirationDate",
-        "pwdLastSet","PasswordLastSet","PasswordNeverExpires",
-        "SamAccountName","Name"
+function Find-User {
+    param(
+        [string]$SearchValue,
+        [bool]$SearchByLogin,
+        [string]$PDCServer
     )
+    $properties = @('Enabled', 'LockedOut', 'AccountExpirationDate',
+                    'pwdLastSet', 'PasswordLastSet', 'PasswordNeverExpires',
+                    'SamAccountName', 'Name')
 
-    try {
-        if ($rbLogin.IsChecked) {
-            $user = Get-ADUser -Filter "sAMAccountName -eq '$searchValue'" -Properties $props
-            if (-not $user) { Set-Status "Login '$searchValue' not found." $true; return }
-        }
-        else {
-            $users = @(Get-ADUser -Filter "sn -like '$searchValue*'" -Properties $props)
-
-            if ($users.Count -eq 0) {
-                Set-Status "Surname '$searchValue' not found." $true
-                return
-            }
-
-            if ($users.Count -gt 1) {
-                $selection = $users |
-                    Select-Object Name, SamAccountName, DistinguishedName |
-                    Out-GridView -Title "Select user" -PassThru
-
-                if (-not $selection) {
-                    Set-Status "Selection cancelled." $true
-                    return
-                }
-
-                $user = Get-ADUser -Identity $selection.SamAccountName -Properties $props
-            }
-            else {
-                $user = $users[0]
-            }
-        }
+    if ($SearchByLogin) {
+        $user = Get-ADUser -Server $PDCServer -Filter "sAMAccountName -eq '$SearchValue'" -Properties $properties -ErrorAction Stop
+        if (-not $user) { throw "Login '$SearchValue' not found." }
+        return $user
     }
-    catch {
-        Set-Status "Search error: $($_.Exception.Message)" $true
+    else {
+        $users = @(Get-ADUser -Server $PDCServer -Filter "sn -like '$SearchValue*'" -Properties $properties -ErrorAction Stop)
+        if ($users.Count -eq 0) { throw "Surname '$SearchValue' not found." }
+        if ($users.Count -eq 1) { return $users[0] }
+
+        # Multiple matches – let user choose
+        $selection = $users |
+            Select-Object Name, SamAccountName, DistinguishedName |
+            Out-GridView -Title "Select user" -PassThru
+
+        if (-not $selection) { throw "Selection cancelled." }
+        return Get-ADUser -Server $PDCServer -Identity $selection.SamAccountName -Properties $properties -ErrorAction Stop
+    }
+}
+
+function Update-UIWithUser {
+    param([Microsoft.ActiveDirectory.Management.ADUser]$User)
+
+    $script:CurrentSam = $User.SamAccountName
+    $script:txtUser.Text = "$($User.Name) ($($User.SamAccountName))"
+
+    # Disabled
+    if (-not $User.Enabled) {
+        $script:txtDisabled.Text = 'Yes'
+        Set-RedBold $script:txtDisabled
+    } else {
+        $script:txtDisabled.Text = 'No'
+    }
+
+    # Locked
+    if ($User.LockedOut) {
+        $script:txtLocked.Text = 'Yes'
+        Set-RedBold $script:txtLocked
+        $script:btnUnlock.Visibility = 'Visible'
+    } else {
+        $script:txtLocked.Text = 'No'
+    }
+
+    # Account expiration
+    if ($User.AccountExpirationDate) {
+        if ($User.AccountExpirationDate -lt (Get-Date)) {
+            $script:txtAccExpired.Text = "Yes (expired $(Format-DateShort $User.AccountExpirationDate))"
+            Set-RedBold $script:txtAccExpired
+        } else {
+            $script:txtAccExpired.Text = "No (expires $(Format-DateShort $User.AccountExpirationDate))"
+        }
+    } else {
+        $script:txtAccExpired.Text = 'No (no expiration)'
+    }
+
+    # Must change password
+    if ($User.pwdLastSet -eq 0) {
+        $script:txtMustChange.Text = 'Yes'
+        Set-RedBold $script:txtMustChange
+    } else {
+        $script:txtMustChange.Text = 'No'
+    }
+
+    # Password expiry
+    $pwdInfo = Get-PasswordExpiryInfo -User $User -PDCServer $script:PDCServer -DefaultMaxAge $script:DefaultMaxPasswordAge
+    $script:txtPwdExpired.Text = if ($pwdInfo.Expired) { 'Yes' } else { 'No' }
+    $script:txtPwdExpires.Text = $pwdInfo.ExpiryText
+    if ($pwdInfo.Expired) {
+        Set-RedBold $script:txtPwdExpired
+        Set-RedBold $script:txtPwdExpires
+    }
+}
+
+function Invoke-Search {
+    Clear-ResultFields
+
+    $searchValue = $script:tbSearch.Text.Trim()
+    if (-not $searchValue) {
+        Set-StatusMessage 'Please enter a search value.' -IsError $true
         return
     }
 
-    $script:CurrentSam = $user.SamAccountName
+    try {
+        $user = Find-User -SearchValue $searchValue `
+                          -SearchByLogin $script:rbLogin.IsChecked `
+                          -PDCServer $script:PDCServer
+        Update-UIWithUser -User $user
+        Set-StatusMessage "User loaded successfully from PDC Emulator ($($script:PDCServer))."
+    }
+    catch {
+        Set-StatusMessage $_.Exception.Message -IsError $true
+    }
+}
 
-    # Fill UI
-    $txtUser.Text = "$($user.Name) ($($user.SamAccountName))"
-
-    if (-not $user.Enabled) {
-        $txtDisabled.Text = "Yes"
-        Mark-RedBold $txtDisabled
-    } else {
-        $txtDisabled.Text = "No"
+# === CHANGED: Unlock on both PDC and nearest DC ===
+function Invoke-Unlock {
+    if (-not $script:CurrentSam) {
+        Set-StatusMessage 'No user selected.' -IsError $true
+        return
     }
 
-    if ($user.LockedOut) {
-        $txtLocked.Text = "Yes"
-        Mark-RedBold $txtLocked
-        $btnUnlock.Visibility = "Visible"
-    } else {
-        $txtLocked.Text = "No"
+    $pdcResult = $false
+    $nearestResult = $false
+    $pdcError = $null
+    $nearestError = $null
+
+    # 1. Unlock on PDC Emulator
+    try {
+        Unlock-ADAccount -Server $script:PDCServer -Identity $script:CurrentSam -ErrorAction Stop
+        $pdcResult = $true
+    }
+    catch {
+        $pdcError = $_.Exception.Message
     }
 
-    if ($user.AccountExpirationDate) {
-        if ($user.AccountExpirationDate -lt (Get-Date)) {
-            $txtAccExpired.Text = "Yes (expired $(Format-Date $user.AccountExpirationDate))"
-            Mark-RedBold $txtAccExpired
-        } else {
-            $txtAccExpired.Text = "No (expires $(Format-Date $user.AccountExpirationDate))"
+    # 2. Unlock on nearest DC (if available and different from PDC)
+    $nearestDC = Get-NearestDC
+    if ($nearestDC -and $nearestDC -ne $script:PDCServer) {
+        try {
+            Unlock-ADAccount -Server $nearestDC -Identity $script:CurrentSam -ErrorAction Stop
+            $nearestResult = $true
         }
-    } else {
-        $txtAccExpired.Text = "No (no expiration)"
+        catch {
+            $nearestError = $_.Exception.Message
+        }
+    }
+    else {
+        if (-not $nearestDC) {
+            $nearestError = "No additional DC found (skipped)."
+        }
+        elseif ($nearestDC -eq $script:PDCServer) {
+            $nearestError = "Nearest DC was the same as PDC (skipped)."
+        }
     }
 
-    if ($user.pwdLastSet -eq 0) {
-        $txtMustChange.Text = "Yes"
-        Mark-RedBold $txtMustChange
-    } else {
-        $txtMustChange.Text = "No"
-    }
+    # Build status message
+    $statusLines = @()
+    if ($pdcResult) { $statusLines += "✓ Unlocked on PDC ($($script:PDCServer))" }
+    else { $statusLines += "✗ Failed on PDC: $pdcError" }
 
-    $pwdInfo = Get-PasswordExpiryInfo $user
-    $txtPwdExpired.Text = if ($pwdInfo.Expired) { "Yes" } else { "No" }
-    $txtPwdExpires.Text = $pwdInfo.ExpiryText
+    if ($nearestResult) { $statusLines += "✓ Unlocked on nearest DC ($nearestDC)" }
+    elseif ($nearestError) { $statusLines += "⚠ Nearest DC skip/error: $nearestError" }
 
-    if ($pwdInfo.Expired) {
-        Mark-RedBold $txtPwdExpired
-        Mark-RedBold $txtPwdExpires
-    }
+    $finalStatus = $statusLines -join "`n"
+    $isAnyError = (-not $pdcResult) -or (-not $nearestResult -and $nearestError -and $nearestError -notlike "*skipped*")
+    Set-StatusMessage $finalStatus -IsError $isAnyError
 
-    Set-Status "User loaded successfully."
+    # Always refresh user status from PDC after unlock attempt
+    Invoke-Search
 }
 
 # ============================
-# Unlock Handler
+# UI Initialization & Event Wiring
 # ============================
 
-$btnUnlock.Add_Click({
-    if (-not $script:CurrentSam) {
-        Set-Status "No user selected." $true
-        return
-    }
+function Initialize-UI {
+    # Load XAML
+    $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
+    $window = [Windows.Markup.XamlReader]::Load($reader)
 
-    try {
-        Unlock-ADAccount -Identity $script:CurrentSam -ErrorAction Stop
-        Set-Status "Account '$script:CurrentSam' unlocked."
-        Run-Search
-    }
-    catch {
-        Set-Status "Unlock failed: $($_.Exception.Message)" $true
-    }
-})
+    # Store controls in script scope for access from event handlers
+    $script:window      = $window
+    $script:rbLogin     = $window.FindName('rbLogin')
+    $script:rbSurname   = $window.FindName('rbSurname')
+    $script:tbSearch    = $window.FindName('tbSearch')
+    $script:btnSearch   = $window.FindName('btnSearch')
+    $script:btnUnlock   = $window.FindName('btnUnlock')
+    $script:txtUser     = $window.FindName('txtUser')
+    $script:txtDisabled = $window.FindName('txtDisabled')
+    $script:txtLocked   = $window.FindName('txtLocked')
+    $script:txtPwdExpired = $window.FindName('txtPwdExpired')
+    $script:txtAccExpired = $window.FindName('txtAccExpired')
+    $script:txtMustChange = $window.FindName('txtMustChange')
+    $script:txtPwdExpires = $window.FindName('txtPwdExpires')
+    $script:txtStatus   = $window.FindName('txtStatus')
 
-# Enter triggers search
-$window.Add_KeyDown({
-    if ($_.Key -eq "Enter") { Run-Search }
-})
+    # Wire events
+    $script:btnSearch.Add_Click({ Invoke-Search })
+    $script:btnUnlock.Add_Click({ Invoke-Unlock })
+    $script:window.Add_KeyDown({
+        if ($_.Key -eq 'Enter') { Invoke-Search }
+    })
+}
 
-# Search button
-$btnSearch.Add_Click({ Run-Search })
+# ============================
+# Main Entry Point
+# ============================
 
-# Show window
-$window.ShowDialog() | Out-Null
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+}
+catch {
+    [System.Windows.MessageBox]::Show(
+        "Active Directory module is required.`nPlease install RSAT or load the module manually.",
+        "Missing Dependency", "OK", "Error"
+    )
+    exit 1
+}
+
+# Initialize PDC and default settings
+try {
+    $script:PDCServer = Get-PDCEmulator
+    $script:DefaultMaxPasswordAge = Get-DefaultPasswordAge -PDCServer $script:PDCServer
+}
+catch {
+    [System.Windows.MessageBox]::Show($_.Exception.Message, "PDC Emulator Error", "OK", "Error")
+    exit 1
+}
+
+# Build and show UI
+Initialize-UI
+$script:window.ShowDialog() | Out-Null
