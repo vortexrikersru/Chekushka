@@ -2,6 +2,8 @@
 
 <img width="620" height="395" alt="image" src="https://github.com/user-attachments/assets/9305ab9a-511d-47e2-b8eb-4e1c6cdd577b" />
 
+<br>
+
 **User account management tool that queries the PDC Emulator for lockout status and unlocks accounts on both the PDC Emulator and the nearest domain controller.**
 
 ## Overview
